@@ -1,0 +1,111 @@
+name: Build and Package
+
+# 触发条件：推送到 main 分支或手动触发
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write  # 用于推送 Docker 镜像到 GitHub Packages
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 构建静态资源
+  build-static:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'yarn'
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Build static assets
+        run: yarn build
+
+      - name: Upload static build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-build
+          path: build/
+          retention-days: 5
+
+  # 构建 Docker 镜像
+  build-docker:
+    needs: build-static
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download static build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: static-build
+          path: build/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Packages
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/lxd-ui
+          tags: |
+            type=ref,event=branch
+            type=sha,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # 构建 spice-html5 相关包（可选，根据项目需求）
+  build-spice:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install RPM build tools
+        run: sudo apt-get update && sudo apt-get install -y rpm
+
+      - name: Build spice-html5 package
+        working-directory: src/lib/spice
+        run: |
+          make local  # 生成 RPM 包
+          make package.json  # 生成 npm 包配置
+
+      - name: Upload spice artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: spice-packages
+          path: |
+            src/lib/spice/*.rpm
+            src/lib/spice/package.json
+          retention-days: 5
